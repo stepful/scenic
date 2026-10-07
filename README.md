@@ -4,7 +4,6 @@
 
 [![Build Status](https://github.com/scenic-views/scenic/actions/workflows/ci.yml/badge.svg)](https://github.com/scenic-views/scenic/actions/workflows/ci.yml)
 [![Documentation Quality](http://inch-ci.org/github/scenic-views/scenic.svg?branch=master)](http://inch-ci.org/github/scenic-views/scenic)
-[![Reviewed by Hound](https://img.shields.io/badge/Reviewed_by-Hound-8E64B0.svg)](https://houndci.com)
 
 Scenic adds methods to `ActiveRecord::Migration` to create and manage database
 views in Rails.
@@ -25,7 +24,7 @@ Scenic ships with support for PostgreSQL. The adapter is configurable (see
 
 If you're using Postgres, Add `gem "scenic"` to your Gemfile and run `bundle
 install`. If you're using something other than Postgres, check out the available
-[third party adapters](https://github.com/scenic-views/scenic#faqs).
+[third-party adapters](https://github.com/scenic-views/scenic#when-will-you-support-mysql-sqlite-or-other-databases).
 
 ## Great, how do I create a view?
 
@@ -92,7 +91,8 @@ hierarchies of dependent views.
 
 Scenic offers a `replace_view` schema statement, resulting in a `CREATE OR
 REPLACE VIEW` SQL query which will update the supplied view in place, retaining
-all dependencies. Materialized views cannot be replaced in this fashion.
+all dependencies. Materialized views cannot be replaced in this fashion, though
+the `side_by_side` update strategy may yield similar results (see below).
 
 You can generate a migration that uses the `replace_view` schema statement by
 passing the `--replace` option to the `scenic:view` generator:
@@ -124,6 +124,11 @@ no different than a table.
 class SearchResult < ApplicationRecord
   belongs_to :searchable, polymorphic: true
 
+  # If you want to be able to call +Model.find+, you
+  # must declare the primary key. It can not be
+  # inferred from column information.
+  # self.primary_key = :id
+
   # this isn't strictly necessary, but it will prevent
   # rails from calling save, which would fail anyway.
   def readonly?
@@ -133,7 +138,7 @@ end
 ```
 
 Scenic even provides a `scenic:model` generator that is a superset of
-`scenic:view`.  It will act identically to the Rails `model` generator except
+`scenic:view`. It will act identically to the Rails `model` generator except
 that it will create a Scenic view migration rather than a table migration.
 
 There is no special base class or mixin needed. If desired, any code the model
@@ -179,7 +184,45 @@ materialized views. For example, say you have materialized view A, which selects
 data from materialized view B. To get the most up to date information in view A
 you would need to refresh view B first, then right after refresh view A. If you
 would like this cascading refresh of materialized views, set `cascade: true`
-when you refresh your materialized view.
+on the refresh method in view B.
+
+## Can I update the definition of a materialized view without dropping it?
+
+No, but Scenic can help you approximate this behavior with its `side_by_side`
+update strategy.
+
+Generally, changing the definition of a materialized view requires dropping it
+and recreating it, either without data or with a non-concurrent refresh. The
+materialized view will be locked for selects during the refresh process, which
+can cause problems in your application if the refresh is not fast.
+
+The `side_by_side` update strategy prepares the new version of the view under a
+temporary name. This includes copying the indexes from the original view and
+refreshing the data. Once prepared, the original view is dropped and the new
+view is renamed to the original view's name. This process minimizes the time the
+view is locked for selects at the cost of additional disk space.
+
+You can generate a migration that uses the `side_by_side` strategy by passing
+the `--side-by-side` option to the `scenic:view` generator:
+
+```sh
+$ rails generate scenic:view search_results --materialized --side-by-side
+      create  db/views/search_results_v02.sql
+      create  db/migrate/[TIMESTAMP]_update_search_results_to_version_2.rb
+```
+
+The migration will look something like this:
+
+```ruby
+class UpdateSearchResultsToVersion2 < ActiveRecord::Migration
+  def change
+    update_view :search_results,
+      version: 2,
+      revert_to_version: 1,
+      materialized: { side_by_side: true }
+  end
+end
+```
 
 ## I don't need this view anymore. Make it go away.
 
@@ -194,7 +237,7 @@ end
 
 ## FAQs
 
-**Why do I get an error when querying a view-backed model with `find`, `last`, or `first`?**
+### Why do I get an error when querying a view-backed model with `find`, `last`, or `first`?
 
 ActiveRecord's `find` method expects to query based on your model's primary key,
 but views do not have primary keys. Additionally, the `first` and `last` methods
@@ -209,7 +252,7 @@ class People < ApplicationRecord
 end
 ```
 
-**Why is my view missing columns from the underlying table?**
+### Why is my view missing columns from the underlying table?
 
 Did you create the view with `SELECT [table_name].*`? Most (possibly all)
 relational databases freeze the view definition at the time of creation. New
@@ -222,7 +265,7 @@ add_column :posts, :title, :string
 update_view :posts_with_aggregate_data, version: 2, revert_to_version: 2
 ```
 
-**When will you support MySQL, SQLite, or other databases?**
+### When will you support MySQL, SQLite, or other databases?
 
 We have no plans to add first-party adapters for other relational databases at
 this time because we (the maintainers) do not currently have a use for them.
@@ -230,7 +273,7 @@ It's our experience that maintaining a library effectively requires regular use
 of its features. We're not in a good position to support MySQL, SQLite or other
 database users.
 
-Scenic *does* support configuring different database adapters and should be
+Scenic _does_ support configuring different database adapters and should be
 extendable with adapter libraries. If you implement such an adapter, we're happy
 to review and link to it. We're also happy to make changes that would better
 accommodate adapter gems.
@@ -238,25 +281,39 @@ accommodate adapter gems.
 We are aware of the following existing adapter libraries for Scenic which may
 meet your needs:
 
-* [`scenic_sqlite_adapter`](<https://github.com/pdebelak/scenic_sqlite_adapter>)
-* [`scenic-mysql_adapter`](<https://github.com/EmpaticoOrg/scenic-mysql_adapter>)
-* [`scenic-sqlserver-adapter`](<https://github.com/ClickMechanic/scenic_sqlserver_adapter>)
-* [`scenic-oracle_adapter`](<https://github.com/cdinger/scenic-oracle_adapter>)
+- [`scenic_sqlite_adapter`](https://github.com/pdebelak/scenic_sqlite_adapter)
+- [`scenic-mysql_adapter`](https://github.com/cainlevy/scenic-mysql_adapter)
+- [`scenic-sqlserver-adapter`](https://github.com/ClickMechanic/scenic_sqlserver_adapter)
+- [`scenic-oracle_adapter`](https://github.com/cdinger/scenic-oracle_adapter)
 
 Please note that the maintainers of Scenic make no assertions about the
 quality or security of the above adapters.
 
-**Related projects**
-
-- [`fx`](<https://github.com/teoljungberg/fx>) Versioned database functions and
-  triggers for Rails
-
 ## About
 
+### Used By
+
 Scenic is used by some popular open source Rails apps:
-[Mastodon](<https://github.com/mastodon/mastodon/>),
-[Code.org](<https://github.com/code-dot-org/code-dot-org>), and
-[Lobste.rs](<https://github.com/lobsters/lobsters/>).
+[Mastodon](https://github.com/mastodon/mastodon/),
+[Code.org](https://github.com/code-dot-org/code-dot-org), and
+[Lobste.rs](https://github.com/lobsters/lobsters/).
+
+### Related projects
+
+- [`fx`](https://github.com/teoljungberg/fx) Versioned database functions and
+  triggers for Rails
+
+### Media
+
+Here are a few posts we've seen discussing Scenic:
+
+- [Announcing Scenic - Versioned Database Views for Rails](https://thoughtbot.com/blog/announcing-scenic--versioned-database-views-for-rails) by Derek Prior for thoughtbot
+- [Effectively Using Materialized Views in Ruby on Rails](https://pganalyze.com/blog/materialized-views-ruby-rails) by Leigh Halliday for pganalyze
+- [Optimizing String Concatenation in Ruby on Rails](https://dev.to/pimp_my_ruby/from-slow-to-lightning-fast-optimizing-string-concatenation-in-ruby-on-rails-28nk)
+- [Materialized Views In Ruby On Rails With Scenic](https://www.ideamotive.co/blog/materialized-views-ruby-rails-scenic) by Dawid Karczewski for Ideamotive
+- [Using Scenic and SQL views to aggregate data](https://dev.to/weareredlight/using-scenic-and-sql-views-to-aggregate-data-226k) by André Perdigão for Redlight Software
+
+### Maintainers
 
 Scenic is maintained by [Derek Prior], [Caleb Hearth], and you, our
 contributors.
