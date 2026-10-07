@@ -32,6 +32,22 @@ module Scenic
         expect(first.materialized).to be true
         expect(first.definition).to eq "SELECT 'Owen'::text AS name;"
       end
+
+      it "returns definitions that survive recreating the view from them" do
+        connection = ActiveRecord::Base.connection
+        connection.execute "CREATE TABLE fruits (name varchar)"
+        connection.execute <<-SQL
+          CREATE VIEW sweet_fruits AS
+          SELECT name FROM fruits WHERE name IN ('apple', 'pear')
+        SQL
+
+        definition = Postgres::Views.new(connection).all.first.definition
+        connection.execute "DROP VIEW sweet_fruits"
+        connection.execute "CREATE VIEW sweet_fruits AS #{definition}"
+
+        expect(Postgres::Views.new(connection).all.first.definition)
+          .to eq definition
+      end
     end
   end
 end
