@@ -114,9 +114,44 @@ module Scenic
         def to_scenic_view(result)
           Scenic::View.new(
             name: namespaced_view_name(result),
-            definition: result["definition"].strip,
+            definition: stable_definition(result["definition"].strip),
             materialized: result["kind"] == "m"
           )
+        end
+
+        # Postgres prints the implicit casts it added while parsing, so a
+        # definition can change once it is parsed again: `varchar_col IN ('a')`
+        # dumps as `(ARRAY['a'::character varying])::text[]` and reloads as
+        # `ARRAY[('a'::character varying)::text]`. Returning the form that
+        # survives a reload keeps the dumped schema independent of whether the
+        # view was created by a migration or loaded from a schema dump.
+        def stable_definition(definition)
+          3.times do
+            reparsed = reparse(definition)
+            return definition if reparsed.nil? || reparsed == definition
+
+            definition = reparsed
+          end
+
+          definition
+        end
+
+        def reparse(definition)
+          reparsed = nil
+
+          connection.transaction(requires_new: true) do
+            connection.execute(
+              "CREATE TEMPORARY VIEW scenic_stable_definition AS #{definition}"
+            )
+            reparsed = connection.select_value(
+              "SELECT pg_get_viewdef('pg_temp.scenic_stable_definition'::regclass)"
+            ).strip
+            raise ActiveRecord::Rollback
+          end
+
+          reparsed
+        rescue ActiveRecord::StatementInvalid
+          nil
         end
 
         def namespaced_view_name(result)
